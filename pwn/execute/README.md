@@ -1,70 +1,105 @@
-# Execute — HTB Pwn Challenge (Analysis)
+# Execute — HTB Pwn Challenge
 
-This writeup documents a solution to the **Execute** challenge from Hack The Box (Pwn category). It explains the exploitation strategy used to make the target binary read and print the contents of `flag.txt`. The challenge's executable files can be downloaded from the Hack The Box (HTB) website. No binary/source code is included here — this document contains only my analysis and solutions.
+| | |
+|---|---|
+| **Platform** | [HackTheBox](https://www.hackthebox.com/) |
+| **Category** | Pwn |
+| **Difficulty** | Hard |
 
-## Goal
+## Challenge Overview
 
-The program should read the contents of `flag.txt` (located next to the binary) and print them to stdout. The objective is to supply an input payload that, when executed by the binary, performs the required syscalls to `open`, `read` and `write` the flag.
+The goal is to make the binary read and print the contents of `flag.txt` through shellcode execution. The binary reads input into a stack buffer and executes it directly, but implements a blacklist to block certain bytes.
 
-## Exploitation method
+---
 
-The binary reads up to 60 bytes into a stack buffer:
+## Vulnerability Analysis
 
-- `int size = read(0, buf, 60);`
+### The Bug
 
-and then executes that buffer:
+The binary performs a classic stack-based code injection:
 
-- `((void(*)())buf)();`
+```c
+int size = read(0, buf, 60);    // Reads up to 60 bytes
+((void(*)())buf)();             // Executes buffer as code
+```
 
-The stack is executable, which allows code injection. However, the program uses a hard‑coded blacklist and exits if any forbidden byte is present in the input. The chosen approach is to craft a compact, position‑independent payload that performs `open("flag.txt")`, `read`, and `write`, or alternatively to use a tiny decoder plus an encoded payload so the transmitted bytes avoid the blacklist.
+The stack is **executable** (NX disabled), allowing shellcode execution.
 
-## How I exploit it ?
+### The Restriction
 
-The plan is a two‑stage shellcode:
+A hardcoded blacklist rejects any input containing forbidden bytes. This prevents straightforward shellcode payloads.
 
-- Stage 1 is a tiny loader that allocates an RWX memory region on the heap, reads a second‑stage payload from stdin into that region, then jumps to it.
-- Stage 2 (the larger payload) opens `flag.txt`, reads its contents into a heap buffer, writes them to stdout, and cleans up.
+---
 
-This two‑stage design keeps the first stage compact (to satisfy the input‑size and blacklist constraints) and moves the more complex work into an executable area allocated at runtime.
+## Exploitation Strategy
 
-### Stage 1 - Loader
+### Two-Stage Shellcode
 
-This tiny loader's job is to create a safe, executable region in memory and fetch a larger payload into it. Concretely, it:
+To bypass both size (60 bytes) and blacklist restrictions, we use a two-stage approach:
 
-1. Requests a new memory mapping with read, write and execute permissions,
-2. Reads the second‑stage payload from stdin into that mapping,
-3. Jumps to the newly filled memory to transfer control.
+#### Stage 1: Tiny Loader (fits in 60 bytes)
+1. Allocate an RWX memory region on the heap via `mmap()`
+2. Read the second stage from stdin into that region
+3. Jump to the second stage
 
-Keeping the loader minimal allows it to bypass size and blacklist restrictions in the original program; the heavy lifting is then done by the second stage running from the fresh RWX memory.
+#### Stage 2: Flag Reader
+1. Open `flag.txt`
+2. Read contents into a heap buffer
+3. Write to stdout
+4. Clean up and exit
 
-### Stage 2 - Flag Reader
+---
 
-The second stage performs the actual file operations:
+## Files
 
-1. Allocates a small writable buffer on the heap,
-2. Opens the file named `flag.txt`,
-3. Reads the file into the heap buffer,
-4. Writes the bytes read to standard output,
-5. Closes the file and frees the heap mapping before returning.
+| File | Description |
+|------|-------------|
+| `payload.asm` | Assembly source for shellcode stages |
+| `Makefile` | Builds and extracts binary payload |
+| `exploit.py` | Python exploit script using pwntools |
+| `payload.bin` | Raw binary shellcode |
 
-In short: Stage 2 executes `open → read → write` (and cleanup), while Stage 1 simply makes room and transfers control.
+---
 
-## Why I did use this Method
+## Usage
 
-The two‑stage, heap‑based approach provides precise control while keeping the initial payload small enough to avoid the binary’s size and blacklist restrictions. By allocating an RWX region and loading a larger second stage there, the loader remains tiny and position‑independent, and the second stage can perform file operations reliably. An alternative would have been to spawn a shell and print the flag, but the heap‑based method gives better control and fits the constraints of this challenge.
+### Prerequisites
+- `pwntools` installed
+- `nasm` for assembly
 
-## How to exploit
+### Build Payload
 
-Place the build and runner files in the challenge directory (Makefile, assembler source(s) such as payload.asm, payload.bin, and exploit.py). The general workflow:
+```bash
+make
+```
 
-1. Preparation
-   - Put Makefile, assembler source and exploit.py in the same folder as the `execute` binary.
+This assembles `payload.asm` and extracts the `.text` section to `payload.bin`.
 
-2. Build the payload
-   - Run the Makefile to assemble and extract the .text section into payload.bin (e.g. `make`).
+### Local Exploitation
 
-3. Local exploitation
-   - Use the Makefile `run` target or run the exploit script directly (`python3 exploit.py`). A local exploit typically uses pwntools `process()` to start the target, sends payload.bin, and switches to interactive mode to view output.
+```bash
+# Using Makefile
+make run
 
-4. Remote exploitation
-   - Adapt the exploit script to connect to a remote service using pwntools `remote(host, port)`
+# Or manually with pwntools
+python3 exploit.py
+```
+
+### Remote Exploitation
+
+Modify `exploit.py` to use `remote(host, port)` instead of `process()`:
+
+```python
+io = remote('target-ip', port)
+```
+
+---
+
+## Why This Approach?
+
+The two-stage design:
+- Keeps Stage 1 small enough to fit 60-byte limit and evade blacklist
+- Allocates fresh RWX memory for Stage 2 to perform file operations
+- Provides precise control over syscalls
+
+Alternative approaches (spawning shell, direct syscalls) were blocked by the blacklist or size constraints.
